@@ -1,0 +1,7 @@
+id,muxer
+rust-0.40.0,yamux
+rust-0.40.0,mplex
+rust-0.39.0,yamux
+rust-0.39.0,mplex
+go-0.23.0,yamux
+go-0.23.0,mplex
