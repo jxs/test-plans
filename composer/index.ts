@@ -2,13 +2,24 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import { promisify } from "util";
 import toml from "@iarna/toml";
+import yargs from "yargs";
 
 const execFile = promisify(require("node:child_process").execFile);
 const writeFile = promisify(require("node:fs").writeFile);
 const unlink = promisify(require("node:fs").unlink);
 
-const dbName = "combinations.db";
+const DB = "combinations.db";
+// Set the builder as docker generic for every group.
+const BUILDER = "docker:generic";
 
+// Command line arguments.
+const argv = yargs(process.argv.slice(2)).options({
+    "git-rev": { type: "string", demandOption: true },
+    "git-target": { type: "string", demandOption: true },
+    "total_instances": { type: "number", demandOption: true },
+}).parseSync();
+
+// TOML schema to generate.
 class Instance {
     count: number;
 
@@ -17,29 +28,40 @@ class Instance {
     }
 }
 
-class Params {
-    transport: string;
-    muxer: string;
+class BuildArgs {
+    TRANSPORT: string;
+    MUXER: string;
+    VERSION: string;
 
-    constructor(transport: string, muxer: string) {
-        this.transport = transport;
-        this.muxer = muxer;
+    constructor(transport: string, muxer: string, version: string) {
+        this.TRANSPORT = transport;
+        this.MUXER = muxer;
+        this.VERSION = version
     }
 }
+class BuildConfig {
+    build_args: BuildArgs;
 
+    constructor(build_args: BuildArgs) {
+        this.build_args = build_args;
+    }
+}
 class Group {
     id: string;
-    test_params: Params;
+    builder: string;
+    build_config: BuildConfig;
     instances: Instance;
 
     constructor(
         id: string,
+        builder: string,
         instances: Instance,
-        test_params: Params
+        build_config: BuildConfig,
     ) {
         this.id = id;
+        this.builder = builder;
         this.instances = instances;
-        this.test_params = test_params;
+        this.build_config = build_config;
     }
 }
 
@@ -53,10 +75,24 @@ class Run {
     }
 }
 
+class Global {
+    plan: string;
+    case: string;
+    total_instances: number;
+
+    constructor(plan: string, plan_case: string, total_instances: number) {
+        this.plan = plan;
+        this.case = plan_case;
+        this.total_instances = total_instances;
+    }
+}
+
 class Composition {
+    global: Global;
     runs: Run[];
 
-    constructor(runs: Run[]) {
+    constructor(global: Global, runs: Run[]) {
+        this.global = global;
         this.runs = runs;
     }
 }
@@ -69,7 +105,7 @@ async function main() {
     // the dot commands are interpreted by the sqlite cli tool not sqlite itself,
     // and it is a lot faster parsing the csv's.
     const { stdout, stderr } = await execFile("sqlite3", [
-        dbName,
+        DB,
         ".mode csv",
         ".import transports.csv transports",
         ".import muxers.csv muxers",
@@ -79,7 +115,7 @@ async function main() {
     }
 
     const db = await open({
-        filename: dbName,
+        filename: DB,
         driver: sqlite3.Database,
     });
 
@@ -96,24 +132,31 @@ async function main() {
                      AND ma.muxer == mb.muxer;`);
     await db.close();
 
-    let output = new Composition([]);
+    let global = new Global("multidimensional-testing", "multidimensional", argv.total_instances);
+    let composition = new Composition(global, []);
 
     for (let row of queryResults) {
+        // Instance count is hardcoded to 1 for now.
         let instance = new Instance(1);
 
-        let test_params = new Params(row.transport, row.muxer)
-        let group1 = new Group(row.id1, instance, test_params);
-        let group2 = new Group(row.id2, instance, test_params);
+        let build_args1 = new BuildArgs(row.transport, row.muxer, row.id1);
+        let build_config1 = new BuildConfig(build_args1);
+        let group1 = new Group(row.id1, BUILDER, instance, build_config1);
 
-        let run = new Run(`${row.id1} x ${row.id2}`, [group1, group2]);
+        let build_args2 = new BuildArgs(row.transport, row.muxer, row.id2);
+        let build_config2 = new BuildConfig(build_args2);
+        let group2 = new Group(row.id2, BUILDER, instance, build_config2);
 
-        output.runs.push(run);
+        let run = new Run(`${row.id1} x ${row.id2} x ${row.transport} x
+                          ${row.muxer}`, [group1, group2]);
+
+        composition.runs.push(run);
     }
 
     // Write the TOML file and remove the database file to avoid corrupting
     // future runs.
-    await writeFile("composition.toml", toml.stringify(output as any));
-    await unlink(dbName);
+    await writeFile("composition.toml", toml.stringify(composition as any));
+    await unlink(DB);
 }
 
 main()
